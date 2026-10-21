@@ -65,6 +65,23 @@ npm run desktop:build
 
 建议安装到稳定位置后再开启开机自启。如果移动独立 EXE，请重新保存一次开机自启设置以更新程序路径。
 
+## 自动构建制品
+
+GitHub Actions 工作流：[ci.yaml](.github/workflows/ci.yaml)。
+
+推送到 `main`、向 `main` 提交 PR 或推送 `v*` 版本标签时，会自动运行 Windows x64 构建；也可以进入仓库 [Actions → Windows CI](https://github.com/peach-zhang/MagicTrackpadBluetoothBatteryLevel/actions/workflows/ci.yaml)，点击 **Run workflow** 手动触发。
+
+工作流安装锁定的依赖，检查 Rust 格式、运行 Rust 和界面测试，然后生成正式程序与 NSIS 安装包。运行成功后，在该次工作流页面底部的 **Artifacts** 下载 `MagicTrackpadBattery-windows-x64-<运行编号>`，制品保留 30 天，包含：
+
+- `magic-trackpad-battery.exe`：独立桌面程序。
+- `妙控板电量管家_<版本>_x64-setup.exe`：Windows 安装包。
+- `trackpad-battery.ico`：与托盘相同的 ICO。
+- `SHA256SUMS.txt`：以上文件的 SHA-256 校验值。
+
+程序和安装包的图标统一来自 `design/trackpad-battery.ico`：CI 在构建前同步到 Tauri 的打包图标路径并检查哈希一致，NSIS 也明确使用该图标。该流程上传 Actions 制品，不会自动创建 GitHub Release。
+
+CI 不连接实际蓝牙设备，真实 HID 电量联调请在已连接妙控板的 Windows 电脑上运行 `npm run test:native`。
+
 ## 使用
 
 1. 在 Windows 蓝牙设置中连接并唤醒妙控板，启动应用。

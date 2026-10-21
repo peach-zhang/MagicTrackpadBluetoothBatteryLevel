@@ -32,6 +32,6 @@
     "icon": ["icons/icon.ico"],
     "shortDescription": "Magic Trackpad battery monitor",
     "category": "Utility",
-    "windows": { "nsis": { "languages": ["SimpChinese", "English"], "displayLanguageSelector": true } }
+    "windows": { "nsis": { "languages": ["SimpChinese", "English"], "displayLanguageSelector": true, "installerIcon": "icons/icon.ico" } }
   }
 }

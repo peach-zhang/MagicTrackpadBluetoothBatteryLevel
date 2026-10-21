@@ -1,0 +1,140 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: Test and build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Synchronize application and installer icons with tray icon
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = 'design/trackpad-battery.ico'
+          $destination = 'src-tauri/icons/icon.ico'
+          if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Tray icon source is missing: $source"
+          }
+          Copy-Item -LiteralPath $source -Destination $destination -Force
+          $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+          $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+          if ($sourceHash -ne $destinationHash) {
+            throw 'Application icon differs from the tray icon.'
+          }
+          $config = Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          if (@($config.bundle.icon) -notcontains 'icons/icon.ico') {
+            throw 'The executable must use icons/icon.ico.'
+          }
+          if ($config.bundle.windows.nsis.installerIcon -ne 'icons/icon.ico') {
+            throw 'The NSIS installer must use icons/icon.ico.'
+          }
+          Write-Output "Tray, application and installer icon source: $sourceHash"
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
+
+      - name: Run interface tests
+        run: npm run test:ui
+
+      - name: Build Windows executable and NSIS installer
+        env:
+          TAURI_BUNDLER_TOOLS_GITHUB_TOKEN: ${{ github.token }}
+        run: npm run desktop:build -- --ci --bundles nsis -- --locked
+
+      - name: Collect Windows artifacts
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = 'artifacts/windows-x64'
+          New-Item -ItemType Directory -Path $output -Force | Out-Null
+          $executable = 'src-tauri/target/release/magic-trackpad-battery.exe'
+          if (!(Test-Path -LiteralPath $executable -PathType Leaf)) {
+            throw "The desktop executable was not generated: $executable"
+          }
+          $installers = @(Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis/*-setup.exe' -File)
+          if ($installers.Count -eq 0) {
+            throw 'No Windows NSIS installer was generated.'
+          }
+          Copy-Item -LiteralPath $executable -Destination $output
+          foreach ($installer in $installers) {
+            Copy-Item -LiteralPath $installer.FullName -Destination $output
+          }
+          Copy-Item -LiteralPath 'design/trackpad-battery.ico' -Destination $output
+          $checksums = Get-ChildItem -LiteralPath $output -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            '{0}  {1}' -f $hash, $_.Name
+          }
+          $checksums | Set-Content -LiteralPath "$output/SHA256SUMS.txt" -Encoding utf8NoBOM
+          @(
+            '## Windows x64 build',
+            '',
+            'Download the artifact attached to this workflow run for the standalone EXE, NSIS installer, ICO and SHA-256 checksums.',
+            '',
+            'The tray, executable and installer use the same design/trackpad-battery.ico source.'
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Upload Windows executable and installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MagicTrackpadBattery-windows-x64-${{ github.run_number }}
+          path: artifacts/windows-x64/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload interface test diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interface-test-diagnostics-${{ github.run_number }}
+          path: |
+            artifacts/test-results/
+            artifacts/overview.png
+            artifacts/history.png
+            artifacts/settings.png
+          if-no-files-found: ignore
+          retention-days: 7
