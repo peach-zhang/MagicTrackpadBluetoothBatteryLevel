@@ -65,6 +65,9 @@ jobs:
             throw 'Application icon differs from the tray icon.'
           }
           $config = Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          if ($config.productName -notmatch '^[A-Za-z0-9._ -]+$') {
+            throw 'Use an English productName so the default installation directory is English.'
+          }
           if (@($config.bundle.icon) -notcontains 'icons/icon.ico') {
             throw 'The executable must use icons/icon.ico.'
           }
@@ -96,14 +99,22 @@ jobs:
           if (!(Test-Path -LiteralPath $executable -PathType Leaf)) {
             throw "The desktop executable was not generated: $executable"
           }
-          $installers = @(Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis/*-setup.exe' -File)
-          if ($installers.Count -eq 0) {
-            throw 'No Windows NSIS installer was generated.'
+          $config = Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $installerScript = Get-Content -LiteralPath 'src-tauri/target/release/nsis/x64/installer.nsi' -Raw
+          $expectedProductName = '!define PRODUCTNAME "{0}"' -f $config.productName
+          if (!$installerScript.Contains($expectedProductName)) {
+            throw 'The generated installer script does not use the configured English product name.'
+          }
+          if (!$installerScript.Contains('StrCpy $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"')) {
+            throw 'The generated installer does not use the expected current-user installation directory.'
+          }
+          $installerName = '{0}_{1}_x64-setup.exe' -f $config.productName, $config.version
+          $installer = Join-Path 'src-tauri/target/release/bundle/nsis' $installerName
+          if (!(Test-Path -LiteralPath $installer -PathType Leaf)) {
+            throw "The expected Windows installer was not generated: $installer"
           }
           Copy-Item -LiteralPath $executable -Destination $output
-          foreach ($installer in $installers) {
-            Copy-Item -LiteralPath $installer.FullName -Destination $output
-          }
+          Copy-Item -LiteralPath $installer -Destination $output
           Copy-Item -LiteralPath 'design/trackpad-battery.ico' -Destination $output
           $checksums = Get-ChildItem -LiteralPath $output -File | Sort-Object Name | ForEach-Object {
             $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

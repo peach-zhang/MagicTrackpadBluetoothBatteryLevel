@@ -63,7 +63,9 @@ npm run desktop:build
 
 生成的独立程序位于 `src-tauri/target/release/magic-trackpad-battery.exe`，NSIS 安装包位于 `src-tauri/target/release/bundle/nsis/`。桌面成品不依赖 Python、Node.js 或常驻网页服务器；Windows 需要安装 WebView2 Runtime。
 
-建议安装到稳定位置后再开启开机自启。如果移动独立 EXE，请重新保存一次开机自启设置以更新程序路径。
+Windows 新安装的默认目录为 `%LOCALAPPDATA%\MagicTrackpadBattery`，安装包名称为 `MagicTrackpadBattery_<版本>_x64-setup.exe`。窗口和托盘仍显示中文名称，应用标识与历史数据目录保持为 `com.trackpad.battery`。
+
+建议安装到稳定位置后再开启开机自启。如果移动独立 EXE，请重新保存一次开机自启设置以更新程序路径。已安装在旧中文目录的版本不会被自动搬迁，请使用新版安装包安装到英文目录，再通过旧版卸载程序移除旧安装；保留应用数据即可继续使用原有历史记录。
 
 ## 自动构建制品
 
@@ -74,7 +76,7 @@ GitHub Actions 工作流：[ci.yaml](.github/workflows/ci.yaml)。
 工作流安装锁定的依赖，检查 Rust 格式、运行 Rust 和界面测试，然后生成正式程序与 NSIS 安装包。运行成功后，在该次工作流页面底部的 **Artifacts** 下载 `MagicTrackpadBattery-windows-x64-<运行编号>`，制品保留 30 天，包含：
 
 - `magic-trackpad-battery.exe`：独立桌面程序。
-- `妙控板电量管家_<版本>_x64-setup.exe`：Windows 安装包。
+- `MagicTrackpadBattery_<版本>_x64-setup.exe`：Windows 安装包。
 - `trackpad-battery.ico`：与托盘相同的 ICO。
 - `SHA256SUMS.txt`：以上文件的 SHA-256 校验值。
 

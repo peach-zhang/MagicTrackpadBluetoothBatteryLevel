@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "妙控板电量管家",
+  "productName": "MagicTrackpadBattery",
   "version": "0.1.0",
   "identifier": "com.trackpad.battery",
   "build": {
