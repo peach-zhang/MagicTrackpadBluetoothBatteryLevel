@@ -1,6 +1,35 @@
 # 妙控板电量管家
 
-面向 Windows 的 Apple Magic Trackpad 电量工具，使用 **Tauri 2 + Rust + React + TypeScript** 开发。界面沿用项目的薄荷绿视觉原型与应用图标。
+**MagicTrackpadBluetoothBatteryLevel** 是面向 Windows 的 Apple Magic Trackpad 电量工具，使用 **Tauri 2 + Rust + React + TypeScript** 开发。界面沿用项目的薄荷绿视觉原型与应用图标。
+
+## 界面预览
+
+### 实际运行界面
+
+下面的截图来自正式桌面程序连接真实妙控板后的运行界面。电量、历史曲线和统计值均为截图时的实际记录。
+
+![妙控板电量管家实际运行界面](docs/images/overview.png)
+
+<details>
+<summary>查看电量历史和设置页面</summary>
+
+以下两张截图使用带有明确标记的演示数据，展示历史筛选、CSV 导出及提醒设置。
+
+![电量历史页面（演示数据）](docs/images/history.png)
+
+![提醒与托盘设置页面（演示数据）](docs/images/settings.png)
+
+</details>
+
+### 设计稿与应用图标
+
+![妙控板电量管家设计稿](design/trackpad-battery-prototype.png)
+
+<img src="design/trackpad-battery-icon.png" width="96" height="96" alt="妙控板电量管家应用图标" />
+
+[下载 Windows ICO 图标](design/trackpad-battery.ico)。托盘使用该图标，实时电量显示在悬停提示和右键菜单中。
+
+截图、设计稿和图标均已随源码纳入仓库，以上图片使用仓库内的相对路径。
 
 ## 功能
 
@@ -80,6 +109,6 @@ npm run test:native
 - `src-tauri/src/`：HID 读取、SQLite 存储、提醒策略、托盘、自启和应用命令。
 - `public/`：应用图标与生图脚本生成的触控板插画。
 - `design/`：原型图与图标源文件。
-- `generate_image.py`：用户提供的设计素材生成脚本，仅开发设计阶段使用，不参与应用运行或打包。
+- `docs/images/`：README 使用的界面截图。
 
-# MagicTrackpadBluetoothBatteryLevel
+本地生图辅助脚本不纳入 Git，也不参与桌面应用运行或打包。仓库已包含构建所需的设计素材。

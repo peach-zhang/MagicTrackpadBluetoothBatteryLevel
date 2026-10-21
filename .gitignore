@@ -1,0 +1,21 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+artifacts/
+playwright-report/
+test-results/
+
+# Local-only image generation script
+/generate_image.py
+
+# Local Python caches and battery data
+__pycache__/
+*.pyc
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

@@ -1,0 +1,36 @@
+[package]
+name = "magic-trackpad-battery"
+version = "0.1.0"
+description = "Windows Magic Trackpad battery monitor"
+authors = ["Magic Trackpad Battery"]
+edition = "2021"
+rust-version = "1.82"
+
+[lib]
+name = "magic_trackpad_battery_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-ico"] }
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+rusqlite = { version = "0.38", features = ["bundled"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+rfd = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+# The C Windows backend exposes get_input_report; windows-native does not.
+hidapi = { version = "2.6", default-features = false }
+winreg = "0.55"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
