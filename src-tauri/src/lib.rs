@@ -19,6 +19,8 @@ struct Runtime {
     alert: AlertState,
     current: Option<model::Reading>,
     last_error: Option<String>,
+    warnings: Vec<String>,
+    startup_warnings: Vec<String>,
     tray_available: bool,
 }
 
@@ -44,43 +46,82 @@ impl AppState {
     fn dashboard(&self) -> Result<Dashboard, String> {
         let state = self.lock()?;
         let now = now_ms();
-        Ok(Dashboard {
-            current: state.current.clone(),
-            samples: state
-                .db
-                .history(Some(now.saturating_sub(24 * 60 * 60 * 1000)))?,
-            stats: state.db.stats(
+        let mut warnings = state.startup_warnings.clone();
+        warnings.extend(state.warnings.clone());
+        let stats = state
+            .db
+            .stats(
                 state
                     .current
                     .as_ref()
                     .map(|reading| reading.device_id.as_str()),
                 now,
-            )?,
+            )
+            .unwrap_or_else(|error| {
+                warnings.push(format!("电量统计暂不可用：{error}"));
+                model::DashboardStats::default()
+            });
+        let history_count = state.db.history_count().unwrap_or_else(|error| {
+            warnings.push(format!("无法统计历史记录：{error}"));
+            0
+        });
+        Ok(Dashboard {
+            current: state.current.clone(),
+            stats,
             settings: state.settings.clone(),
             last_error: state.last_error.clone(),
+            warnings,
+            history_count,
             monitoring: true,
         })
     }
 }
 
 #[tauri::command]
-fn get_dashboard(state: tauri::State<'_, AppState>) -> Result<Dashboard, String> {
-    state.dashboard()
+async fn get_dashboard(app: tauri::AppHandle) -> Result<Dashboard, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().dashboard())
+        .await
+        .map_err(|error| format!("读取概览失败：{error}"))?
+}
+
+fn history_since(hours: Option<f64>) -> Result<Option<i64>, String> {
+    match hours {
+        Some(hours) if !hours.is_finite() || hours <= 0.0 || hours > 876_000.0 => {
+            Err("历史时间范围必须为大于零的有效小时数".into())
+        }
+        Some(hours) => Ok(Some(now_ms().saturating_sub((hours * 3_600_000.0) as i64))),
+        None => Ok(None),
+    }
 }
 
 #[tauri::command]
-fn get_history(
+async fn get_history(
     hours: Option<f64>,
-    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<Vec<model::Reading>, String> {
-    let since = match hours {
-        Some(hours) if !hours.is_finite() || hours <= 0.0 || hours > 876_000.0 => {
-            return Err("历史时间范围必须为大于零的有效小时数".into())
-        }
-        Some(hours) => Some(now_ms().saturating_sub((hours * 3_600_000.0) as i64)),
-        None => None,
-    };
-    state.lock()?.db.history(since)
+    let since = history_since(hours)?;
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().lock()?.db.history(since))
+        .await
+        .map_err(|error| format!("读取历史失败：{error}"))?
+}
+
+#[tauri::command]
+async fn get_history_view(
+    hours: Option<f64>,
+    app: tauri::AppHandle,
+) -> Result<model::HistoryView, String> {
+    let since = history_since(hours)?;
+    // Read on a separate connection so large histories never hold Runtime's mutex.
+    tauri::async_runtime::spawn_blocking(move || {
+        let (reader, poll_seconds) = {
+            let state = app.state::<AppState>();
+            let runtime = state.lock()?;
+            (runtime.db.export_reader()?, runtime.settings.poll_seconds)
+        };
+        reader.history_view(since, poll_seconds)
+    })
+    .await
+    .map_err(|error| format!("读取历史视图失败：{error}"))?
 }
 
 fn persist_settings(app: &tauri::AppHandle, settings: Settings) -> Result<Settings, String> {
@@ -109,8 +150,10 @@ fn persist_settings(app: &tauri::AppHandle, settings: Settings) -> Result<Settin
 }
 
 #[tauri::command]
-fn save_settings(settings: Settings, app: tauri::AppHandle) -> Result<Settings, String> {
-    persist_settings(&app, settings)
+async fn save_settings(settings: Settings, app: tauri::AppHandle) -> Result<Settings, String> {
+    tauri::async_runtime::spawn_blocking(move || persist_settings(&app, settings))
+        .await
+        .map_err(|error| format!("保存设置任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -121,7 +164,6 @@ async fn refresh_battery(app: tauri::AppHandle) -> Result<Dashboard, String> {
 #[tauri::command]
 async fn export_history(app: tauri::AppHandle) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let readings = app.state::<AppState>().lock()?.db.history(None)?;
         let destination = rfd::FileDialog::new()
             .set_title("导出妙控板电量历史")
             .add_filter("CSV 表格", &["csv"])
@@ -133,8 +175,13 @@ async fn export_history(app: tauri::AppHandle) -> Result<Option<String>, String>
         if path.extension().is_none() {
             path.set_extension("csv");
         }
-        std::fs::write(&path, storage::csv(&readings))
-            .map_err(|e| format!("无法保存 CSV 文件：{e}"))?;
+        let reader = app.state::<AppState>().lock()?.db.export_reader()?;
+        if reader.history_count()? == 0 {
+            return Err("还没有可导出的历史记录".into());
+        }
+        let file = std::fs::File::create(&path).map_err(|e| format!("无法保存 CSV 文件：{e}"))?;
+        let mut writer = std::io::BufWriter::new(file);
+        reader.export_csv(&mut writer)?;
         Ok(Some(path.to_string_lossy().into_owned()))
     })
     .await
@@ -151,14 +198,14 @@ async fn sample(app: &tauri::AppHandle) -> Result<Dashboard, String> {
     let result = tauri::async_runtime::spawn_blocking(hid::read_isolated)
         .await
         .unwrap_or_else(|error| Err(format!("HID 读取任务失败：{error}")));
-    let mut error_event = None;
     {
         let mut runtime = state.lock()?;
+        runtime.warnings.clear();
         match result {
             Ok(reading) => {
                 runtime.last_error = None;
                 if let Err(error) = runtime.db.insert(&reading) {
-                    runtime.last_error = Some(error);
+                    runtime.warnings.push(error);
                 }
                 let mut alert = runtime.alert.clone();
                 if alert.observe(
@@ -178,39 +225,30 @@ async fn sample(app: &tauri::AppHandle) -> Result<Dashboard, String> {
                         .show()
                     {
                         Ok(()) => alert.delivered(reading.timestamp),
-                        Err(error) => {
-                            runtime.last_error = Some(format!(
-                                "发送 Windows 通知失败，请检查系统通知权限：{error}"
-                            ))
-                        }
+                        Err(error) => runtime.warnings.push(format!(
+                            "发送 Windows 通知失败，请检查系统通知权限：{error}"
+                        )),
                     }
                 }
                 if alert != runtime.alert {
                     if let Err(error) = runtime.db.save_alert(&alert) {
-                        runtime.last_error = Some(error);
+                        runtime.warnings.push(error);
                     }
                     runtime.alert = alert;
                 }
                 runtime.current = Some(reading);
-                if let Some(error) = &runtime.last_error {
-                    error_event = Some(error.clone());
-                }
             }
             Err(error) => {
                 // Keep real historical samples; a disconnected device has no
                 // current value, rather than reusing an old percentage as live.
                 runtime.current = None;
-                runtime.last_error = Some(error.clone());
-                error_event = Some(error);
+                runtime.last_error = Some(error);
             }
         }
     }
     let dashboard = state.dashboard()?;
     update_tray(app, &dashboard);
     let _ = app.emit("battery-updated", &dashboard);
-    if let Some(error) = error_event {
-        let _ = app.emit("battery-error", error);
-    }
     Ok(dashboard)
 }
 
@@ -219,6 +257,7 @@ fn show_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        let _ = app.emit("window-visibility", true);
     }
 }
 
@@ -333,15 +372,17 @@ pub fn run() {
             get_dashboard,
             refresh_battery,
             get_history,
+            get_history_view,
             save_settings,
             export_history
         ])
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&directory)?;
-            let db = Storage::open(&directory.join("battery.sqlite3"))?;
+            let mut db = Storage::open(&directory.join("battery.sqlite3"))?;
             let settings = db.settings()?;
             let alert = db.alert()?;
+            let startup_warnings = db.take_warnings();
             app.manage(AppState {
                 inner: Mutex::new(Runtime {
                     db,
@@ -349,6 +390,8 @@ pub fn run() {
                     alert,
                     current: None,
                     last_error: None,
+                    warnings: Vec::new(),
+                    startup_warnings,
                     tray_available: false,
                 }),
                 sampling: tokio::sync::Mutex::new(()),
@@ -358,8 +401,10 @@ pub fn run() {
             let tray = setup_tray(app.handle(), &settings);
             let tray_available = tray.is_ok();
             if let Err(error) = tray {
-                app.state::<AppState>().lock()?.last_error =
-                    Some(format!("系统托盘初始化失败：{error}"));
+                app.state::<AppState>()
+                    .lock()?
+                    .startup_warnings
+                    .push(format!("系统托盘初始化失败：{error}"));
             }
             app.state::<AppState>().lock()?.tray_available = tray_available;
             let minimized =
@@ -390,7 +435,9 @@ pub fn run() {
                         .unwrap_or(false);
                     if hide {
                         api.prevent_close();
-                        let _ = window.hide();
+                        if window.hide().is_ok() {
+                            let _ = window.app_handle().emit("window-visibility", false);
+                        }
                     }
                 }
             }

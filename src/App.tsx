@@ -8,7 +8,7 @@ import {
   Settings as SettingsIcon, ShieldCheck, SlidersHorizontal, Square, TriangleAlert, X,
 } from 'lucide-react';
 import * as api from './api';
-import type { Dashboard, Reading, Settings } from './api';
+import type { Dashboard, HistoryView, Settings } from './api';
 import BatteryChart from './BatteryChart';
 
 type Page = 'overview' | 'history' | 'settings';
@@ -30,12 +30,20 @@ function SettingRow({ icon, title, description, children }: { icon: ReactNode; t
 
 export default function App() {
   const [page, setPage] = useState<Page>('overview');
-  const [data, setData] = useState<Dashboard>({ current: null, samples: [], settings: api.defaults, last_error: null, monitoring: false, stats: { first_recorded_at: null, today_consumption: null, yesterday_consumption: null } });
+  const [data, setData] = useState<Dashboard>({ current: null, settings: api.defaults, last_error: null, warnings: [], history_count: 0, monitoring: false, stats: { first_recorded_at: null, today_consumption: null, yesterday_consumption: null } });
   const [draft, setDraft] = useState<Settings>(api.defaults);
   const dirty = useRef(false);
   const [isDirty, setDirty] = useState(false);
   const [range, setRange] = useState<number | null>(24);
-  const [readings, setReadings] = useState<Reading[]>([]);
+  const [history, setHistory] = useState<HistoryView>({ points: [], records: [], total: 0 });
+  const [active, setActive] = useState(!api.desktop);
+  const activeRef = useRef(!api.desktop);
+  const [syncKey, setSyncKey] = useState(0);
+  const [now, setNow] = useState(Date.now());
+  const snapshotVersion = useRef(0);
+  const draftVersion = useRef(0);
+  const savingRef = useRef(false);
+  const readings = history.points;
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -49,31 +57,80 @@ export default function App() {
     noticeTimer.current = setTimeout(() => setNotice(null), error ? 9000 : 5000);
   }, []);
   const acceptData = useCallback((next: Dashboard) => {
+    snapshotVersion.current++;
     setData(next);
+    setNow(Date.now());
     if (!dirty.current) setDraft(next.settings);
     setLoading(false);
   }, []);
   useEffect(() => {
     let disposed = false;
-    const load = () => api.dashboard().then(value => { if (!disposed) acceptData(value); }).catch(error => { if (!disposed) { setLoading(false); notify(errorText(error), true); } });
-    void load();
-    const timer = api.desktop ? setInterval(() => void load(), 15000) : undefined;
     const unsubscribers: (() => void)[] = [];
-    if (api.desktop) {
-      void listen<Dashboard>('battery-updated', e => { if (!disposed) acceptData(e.payload); }).then(fn => disposed ? fn() : unsubscribers.push(fn)).catch(error => { if (!disposed) notify(errorText(error), true); });
-      void listen<string>('battery-error', e => { if (!disposed) setData(current => ({ ...current, last_error: e.payload })); }).then(fn => disposed ? fn() : unsubscribers.push(fn)).catch(error => { if (!disposed) notify(errorText(error), true); });
-    }
-    return () => { disposed = true; if (timer) clearInterval(timer); unsubscribers.forEach(fn => fn()); };
+    let visibilityVersion = 0;
+    const subscribe = async (pending: Promise<() => void>) => {
+      const unsubscribe = await pending;
+      if (disposed) unsubscribe(); else unsubscribers.push(unsubscribe);
+    };
+    const load = async () => {
+      const version = ++snapshotVersion.current;
+      try {
+        const value = await api.dashboard();
+        if (!disposed && activeRef.current && version === snapshotVersion.current) acceptData(value);
+      } catch (error) {
+        if (!disposed && activeRef.current && version === snapshotVersion.current) { setLoading(false); notify(errorText(error), true); }
+      }
+    };
+    const updateVisibility = async (resync = false) => {
+      const version = ++visibilityVersion;
+      try {
+        const visible = document.visibilityState !== 'hidden' && (!api.desktop || (await getCurrentWindow().isVisible() && !await getCurrentWindow().isMinimized()));
+        if (disposed || version !== visibilityVersion) return;
+        const resumed = visible && !activeRef.current;
+        activeRef.current = visible;
+        setActive(visible);
+        if (!visible) snapshotVersion.current++;
+        if (visible && (resumed || resync)) { setSyncKey(key => key + 1); void load(); }
+      } catch (error) { if (!disposed && version === visibilityVersion) notify(errorText(error), true); }
+    };
+    const onVisibility = () => void updateVisibility(true);
+    document.addEventListener('visibilitychange', onVisibility);
+    const start = async () => {
+      try {
+        if (api.desktop) {
+          await Promise.all([
+            subscribe(listen<Dashboard>('battery-updated', e => { if (!disposed && activeRef.current) acceptData(e.payload); })),
+            subscribe(listen<string>('battery-error', e => { if (!disposed && activeRef.current) notify(e.payload, true); })),
+            subscribe(listen<boolean>('window-visibility', e => {
+              if (disposed) return;
+              if (e.payload) void updateVisibility(true);
+              else { visibilityVersion++; snapshotVersion.current++; activeRef.current = false; setActive(false); }
+            })),
+            subscribe(getCurrentWindow().onFocusChanged(e => void updateVisibility(e.payload))),
+            subscribe(getCurrentWindow().onResized(() => void updateVisibility())),
+          ]);
+        }
+      } catch (error) { if (!disposed) notify(errorText(error), true); }
+      if (!disposed) await updateVisibility(true);
+    };
+    void start();
+    return () => { disposed = true; document.removeEventListener('visibilitychange', onVisibility); unsubscribers.forEach(fn => fn()); };
   }, [acceptData, notify]);
+  const showsHistory = page !== 'settings';
   useEffect(() => {
+    if (!active || !showsHistory) return;
     let disposed = false;
-    api.history(range).then(value => { if (!disposed) setReadings(value); }).catch(error => { if (!disposed) notify(errorText(error), true); });
+    api.history(range).then(value => { if (!disposed && activeRef.current) setHistory(value); }).catch(error => { if (!disposed && activeRef.current) notify(errorText(error), true); });
     return () => { disposed = true; };
-  }, [range, data.current?.timestamp, notify]);
+  }, [active, showsHistory, range, data.current?.timestamp, data.history_count, syncKey, notify]);
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(timer);
+  }, [active]);
   useEffect(() => () => { if (noticeTimer.current) clearTimeout(noticeTimer.current); }, []);
 
   const current = data.current;
-  const recent = current !== null && Date.now() - current.timestamp <= Math.max(data.settings.poll_seconds * 3, 180) * 1000;
+  const recent = current !== null && now - current.timestamp <= Math.max(data.settings.poll_seconds * 3, 180) * 1000;
   const connected = recent && !data.last_error && data.monitoring;
   const low = current !== null && current.percent < data.settings.threshold;
   const title = page === 'overview' ? '电量总览' : page === 'history' ? '电量历史' : '提醒设置';
@@ -86,18 +143,30 @@ export default function App() {
   async function refreshNow() {
     if (refreshing) return;
     setRefreshing(true);
-    try { const next = await api.refresh(); acceptData(next); if (next.last_error) notify(next.last_error, true); else notify('电量已更新'); }
-    catch (error) { const text = errorText(error); setData(value => ({ ...value, last_error: text })); notify(text, true); }
+    try { const next = await api.refresh(); acceptData(next); if (next.last_error) notify(next.last_error, true); else if (next.warnings.length) notify(`电量已读取；${next.warnings.join('；')}`, true); else notify('电量已更新'); }
+    catch (error) { notify(errorText(error), true); }
     finally { setRefreshing(false); }
   }
   function change<K extends keyof Settings>(key: K, value: Settings[K]) {
+    draftVersion.current++;
     setDraft(old => ({ ...old, [key]: value })); dirty.current = true; setDirty(true);
   }
   async function persist() {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    const version = draftVersion.current;
     setSaving(true);
-    try { const next = await api.saveSettings(draft); setDraft(next); setData(old => ({ ...old, settings: next })); dirty.current = false; setDirty(false); notify('设置已保存，下次采样将使用新设置'); }
+    try {
+      const next = await api.saveSettings(draft);
+      snapshotVersion.current++;
+      setData(old => ({ ...old, settings: next }));
+      if (version === draftVersion.current) {
+        setDraft(next); dirty.current = false; setDirty(false);
+        notify('设置已保存，下次采样将使用新设置');
+      } else notify('设置已保存，后续修改尚未保存');
+    }
     catch (error) { notify(errorText(error), true); }
-    finally { setSaving(false); }
+    finally { savingRef.current = false; setSaving(false); }
   }
   async function exportCsv() {
     setExporting(true);
@@ -133,6 +202,7 @@ export default function App() {
           {page !== 'settings' && <button aria-label="立即刷新" className="button refresh-button" onClick={() => void refreshNow()} disabled={refreshing || loading}><RefreshCw size={21} className={refreshing ? 'spinning' : ''} />{refreshing ? '读取中' : '刷新'}</button>}
         </header>
         {!api.desktop && <div className="preview-banner"><Info size={15} /><span>{api.demo ? '演示模式 · 当前电量与历史记录均为示意数据' : '浏览器预览 · 启动桌面应用后即可读取设备、记录电量并使用托盘'}</span></div>}
+        {data.warnings.length > 0 && <div className="device-warning" role="status"><TriangleAlert size={20} /><div><strong>部分功能需要处理</strong>{data.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
         {page === 'overview' && <div className="page-content overview-page" key="overview">
           <section className={`hero-card ${low ? 'is-low' : ''}`} aria-label="当前电量">
             <div className="hero-copy">
@@ -147,7 +217,7 @@ export default function App() {
           {data.last_error && <div className="device-warning" role="status"><TriangleAlert size={20} /><div><strong>暂时无法更新电量</strong><p>{data.last_error}</p></div><button className="text-button" onClick={() => void refreshNow()} disabled={refreshing}>重试</button></div>}
           <section className="surface chart-card">
             <div className="section-header"><div className="chart-heading"><h2>电量趋势</h2><p>每{data.settings.poll_seconds >= 60 ? `${data.settings.poll_seconds / 60}分钟` : `${data.settings.poll_seconds}秒`}自动记录</p></div>{rangeControl}</div>
-            <BatteryChart readings={readings} hours={range} threshold={data.settings.threshold} pollSeconds={data.settings.poll_seconds} />
+            <BatteryChart readings={readings} hours={range} threshold={data.settings.threshold} />
           </section>
           <div className="stats-grid">
             <section className="surface stat-card"><span className="stat-icon"><ChartNoAxesColumnIncreasing size={31} strokeWidth={2.4} /></span><div><p>今日消耗</p><strong>{todayConsumption === null ? '—' : todayConsumption}<small>%</small></strong><span className={consumptionDifference !== null && consumptionDifference > 0 ? 'comparison higher' : 'comparison'}>{consumptionDifference !== null ? <>{consumptionDifference > 0 ? <ArrowUp size={16} /> : <ArrowDown size={16} />}{consumptionDifference === 0 ? '相比昨日基本持平' : `比昨日${consumptionDifference > 0 ? '多' : '少'}消耗 ${Math.abs(consumptionDifference)}%`}</> : '至少两条记录后显示每日变化'}</span></div></section>
@@ -155,8 +225,8 @@ export default function App() {
           </div>
         </div>}
         {page === 'history' && <div className="page-content" key="history">
-          <section className="surface chart-card history-chart"><div className="section-header"><div className="chart-heading"><h2>电量趋势</h2><p>查看使用与充电的变化</p></div>{rangeControl}</div><BatteryChart readings={readings} hours={range} threshold={data.settings.threshold} pollSeconds={data.settings.poll_seconds} /></section>
-          <section className="surface records-card"><div className="section-header"><div><h2>采样记录</h2><p>{readings.length > 100 ? '展示最近 100 条，导出包含全部历史' : `共 ${readings.length} 条真实采样记录`}</p></div><button className="button" onClick={() => void exportCsv()} disabled={exporting || !readings.length}><ArrowDownToLine size={17} />{exporting ? '导出中' : '导出全部 CSV'}</button></div><div className="table-scroll"><table><thead><tr><th>采样时间</th><th>设备</th><th>电量</th><th>读取来源</th></tr></thead><tbody>{[...readings].reverse().slice(0, 100).map((reading, index) => <tr key={`${reading.timestamp}-${index}`}><td className="tabular">{dateText(reading.timestamp)}</td><td><MousePointer2 size={15} />{reading.device_name}</td><td><span className={`table-percent ${reading.percent < data.settings.threshold ? 'low' : ''}`}><Battery size={17} />{reading.percent}%</span></td><td className="muted">{reading.source}</td></tr>)}</tbody></table>{!readings.length && <div className="table-empty">这个时间范围内还没有记录</div>}</div></section>
+          <section className="surface chart-card history-chart"><div className="section-header"><div className="chart-heading"><h2>电量趋势</h2><p>查看使用与充电的变化</p></div>{rangeControl}</div><BatteryChart readings={readings} hours={range} threshold={data.settings.threshold} /></section>
+          <section className="surface records-card"><div className="section-header"><div><h2>采样记录</h2><p>{history.total > 100 ? `共 ${history.total} 条，展示最近 100 条；导出包含全部历史` : `共 ${history.total} 条真实采样记录`}</p></div><button className="button" onClick={() => void exportCsv()} disabled={exporting || !data.history_count}><ArrowDownToLine size={17} />{exporting ? '导出中' : '导出全部 CSV'}</button></div><div className="table-scroll"><table><thead><tr><th>采样时间</th><th>设备</th><th>电量</th><th>读取来源</th></tr></thead><tbody>{[...history.records].reverse().map((reading, index) => <tr key={`${reading.timestamp}-${index}`}><td className="tabular">{dateText(reading.timestamp)}</td><td><MousePointer2 size={15} />{reading.device_name}</td><td><span className={`table-percent ${reading.percent < data.settings.threshold ? 'low' : ''}`}><Battery size={17} />{reading.percent}%</span></td><td className="muted">{reading.source}</td></tr>)}</tbody></table>{!history.total && <div className="table-empty">这个时间范围内还没有记录</div>}</div></section>
         </div>}
         {page === 'settings' && <div className="page-content settings-page" key="settings">
           <section className="surface settings-section">

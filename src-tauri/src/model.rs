@@ -51,6 +51,20 @@ impl Settings {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ChartReading {
+    #[serde(flatten)]
+    pub reading: Reading,
+    pub break_before: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryView {
+    pub points: Vec<ChartReading>,
+    pub records: Vec<Reading>,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DashboardStats {
     pub first_recorded_at: Option<i64>,
     pub today_consumption: Option<u32>,
@@ -60,10 +74,12 @@ pub struct DashboardStats {
 #[derive(Debug, Clone, Serialize)]
 pub struct Dashboard {
     pub current: Option<Reading>,
-    pub samples: Vec<Reading>,
     pub stats: DashboardStats,
     pub settings: Settings,
+    /// Only HID acquisition errors affect the device's connection status.
     pub last_error: Option<String>,
+    pub warnings: Vec<String>,
+    pub history_count: u64,
     pub monitoring: bool,
 }
 

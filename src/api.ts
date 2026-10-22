@@ -7,6 +7,8 @@ export interface Reading {
   device_id: string;
   source: string;
 }
+export interface ChartReading extends Reading { break_before: boolean }
+export interface HistoryView { points: ChartReading[]; records: Reading[]; total: number }
 export interface Settings {
   threshold: number;
   poll_seconds: number;
@@ -24,9 +26,10 @@ export interface DashboardStats {
 export interface Dashboard {
   stats: DashboardStats;
   current: Reading | null;
-  samples: Reading[];
   settings: Settings;
   last_error: string | null;
+  warnings: string[];
+  history_count: number;
   monitoring: boolean;
 }
 export const desktop = isTauri();
@@ -44,7 +47,8 @@ const demoHistory: Reading[] = Array.from({ length: demoCount + 1 }, (_, i) => (
 }));
 let demoSettings = { ...defaults };
 const preview: Dashboard = {
-  current: null, samples: [], settings: { ...defaults }, monitoring: false, last_error: null,
+  current: null, settings: { ...defaults }, monitoring: false, last_error: null,
+  warnings: [], history_count: 0,
   stats: { first_recorded_at: null, today_consumption: null, yesterday_consumption: null },
 };
 function demoSnapshot(): Dashboard {
@@ -55,8 +59,8 @@ function demoSnapshot(): Dashboard {
     return samples.length < 2 ? null : samples.slice(1).reduce((sum, sample, index) => sum + Math.max(0, samples[index].percent - sample.percent), 0);
   };
   return {
-    current: demoHistory.at(-1)!, samples: demoHistory.filter(r => r.timestamp >= demoNow - 86400000),
-    settings: demoSettings, last_error: null, monitoring: true,
+    current: demoHistory.at(-1)!, settings: demoSettings,
+    last_error: null, warnings: [], history_count: demoHistory.length, monitoring: true,
     stats: { first_recorded_at: demoHistory[0].timestamp, today_consumption: consumption(midnight, demoNow + 1), yesterday_consumption: consumption(yesterday.getTime(), midnight) },
   };
 }
@@ -68,10 +72,11 @@ export async function refresh(): Promise<Dashboard> {
   if (demo) return demoSnapshot();
   throw new Error('请运行 Tauri 桌面应用以读取妙控板电量。浏览器仅用于预览界面。');
 }
-export async function history(hours: number | null): Promise<Reading[]> {
-  if (desktop) return invoke('get_history', { hours });
-  if (!demo) return [];
-  return demoHistory.filter(r => hours === null || r.timestamp >= demoNow - hours * 3600000);
+export async function history(hours: number | null): Promise<HistoryView> {
+  if (desktop) return invoke('get_history_view', { hours });
+  if (!demo) return { points: [], records: [], total: 0 };
+  const readings = demoHistory.filter(r => hours === null || r.timestamp >= demoNow - hours * 3600000);
+  return { points: readings.map(reading => ({ ...reading, break_before: false })), records: readings.slice(-100), total: readings.length };
 }
 export async function saveSettings(settings: Settings): Promise<Settings> {
   if (desktop) return invoke('save_settings', { settings });
